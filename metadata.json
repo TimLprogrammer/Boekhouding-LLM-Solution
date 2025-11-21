@@ -1,0 +1,5 @@
+{
+  "name": "LLM Solution - Boekhouding",
+  "description": "Minimalistische boekhoudsoftware voor VOF structuren, compliant met Nederlandse BTW en investeringsregelingen (KIA). Interface zonder iconen.",
+  "requestFramePermissions": []
+}
