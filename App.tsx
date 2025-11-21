@@ -1,15 +1,16 @@
+
 import React, { useState, useEffect } from 'react';
 import { supabase } from './services/supabaseClient';
 import { DataService } from './services/dataService';
 import { getFinancialAdvice } from './services/geminiService';
 import { 
     Company, CompanyType, Invoice, InvoiceType, PaymentStatus, Project, 
-    Expense, Investment, Shareholder, VATRate, InvoiceLine, FinancialSummary 
+    Expense, Investment, Shareholder, VATRate, InvoiceLine, FinancialSummary, VatReport 
 } from './types';
 import { 
-    COLORS, EXPENSE_CATEGORIES, KIA_MIN_ITEM_VALUE, 
+    COLORS, EXPENSE_CATEGORIES, INVESTMENT_CATEGORIES, KIA_MIN_ITEM_VALUE, 
     KIA_THRESHOLD_MIN, KIA_BRACKET_1_MAX, KIA_BRACKET_2_MAX, KIA_BRACKET_3_MAX,
-    KIA_PCT_LOW, KIA_FIXED_MID, KIA_REDUCTION_PCT
+    KIA_PCT_LOW, KIA_FIXED_MID, KIA_REDUCTION_PCT, QUARTERS
 } from './constants';
 
 // --- Logic Helpers ---
@@ -23,6 +24,21 @@ const calculateKiaDeduction = (totalInvestments: number): number => {
         return KIA_FIXED_MID - (excess * KIA_REDUCTION_PCT);
     }
     return 0;
+};
+
+const calculateBookValue = (inv: Investment): number => {
+    const purchaseDate = new Date(inv.date);
+    const now = new Date();
+    const ageInMs = now.getTime() - purchaseDate.getTime();
+    const ageInYears = ageInMs / (1000 * 60 * 60 * 24 * 365.25);
+    
+    if (ageInYears >= inv.lifespanYears) return inv.residualValue;
+    
+    const totalDepreciation = inv.purchaseValue - inv.residualValue;
+    const annualDepreciation = totalDepreciation / inv.lifespanYears;
+    const currentDepreciation = annualDepreciation * ageInYears;
+    
+    return Math.max(inv.residualValue, inv.purchaseValue - currentDepreciation);
 };
 
 // --- UI Components ---
@@ -81,6 +97,28 @@ const Select = (props: React.SelectHTMLAttributes<HTMLSelectElement> & { label: 
     </div>
 );
 
+// --- File Upload Component ---
+const FileUpload = ({ onFileSelect }: { onFileSelect: (data: string, name: string) => void }) => {
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                if (evt.target?.result) {
+                    onFileSelect(evt.target.result as string, file.name);
+                }
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+    return (
+        <div className="mb-4">
+            <label className="block text-xs uppercase tracking-widest mb-1 text-brand-brown">Upload PDF Factuur</label>
+            <input type="file" accept="application/pdf" onChange={handleChange} className="w-full p-2 border-2 border-dashed border-brand-taupe bg-brand-cream text-xs" />
+        </div>
+    );
+};
+
 // --- Views ---
 
 const AuthView = ({ onLogin }: { onLogin: () => void }) => {
@@ -95,14 +133,12 @@ const AuthView = ({ onLogin }: { onLogin: () => void }) => {
         setError('');
         try {
             if (!supabase) throw new Error("Geen verbinding met database.");
-            
             let result;
             if (isSignUp) {
                 result = await supabase.auth.signUp({ email, password });
             } else {
                 result = await supabase.auth.signInWithPassword({ email, password });
             }
-
             if (result.error) throw result.error;
             onLogin();
         } catch (err: any) {
@@ -117,16 +153,10 @@ const AuthView = ({ onLogin }: { onLogin: () => void }) => {
             <div className="max-w-md w-full border-4 border-brand-taupe bg-white p-8">
                 <h1 className="text-4xl font-bold text-brand-orange mb-2">LLM<span className="text-brand-brown">SOLUTION</span></h1>
                 <p className="text-brand-taupe uppercase tracking-widest mb-8 text-xs">Boekhouding Login</p>
-                
                 {error && <div className="bg-red-100 text-red-800 p-2 mb-4 text-sm">{error}</div>}
-                
                 <Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} />
                 <Input label="Wachtwoord" type="password" value={password} onChange={e => setPassword(e.target.value)} />
-                
-                <Button onClick={handleAuth} className="w-full mb-4">
-                    {loading ? 'Laden...' : (isSignUp ? 'Registreren' : 'Inloggen')}
-                </Button>
-                
+                <Button onClick={handleAuth} className="w-full mb-4">{loading ? 'Laden...' : (isSignUp ? 'Registreren' : 'Inloggen')}</Button>
                 <button onClick={() => setIsSignUp(!isSignUp)} className="text-xs text-brand-taupe hover:text-brand-orange w-full text-center">
                     {isSignUp ? 'Heb je al een account? Log in' : 'Nog geen account? Registreren'}
                 </button>
@@ -135,7 +165,7 @@ const AuthView = ({ onLogin }: { onLogin: () => void }) => {
     );
 };
 
-const CompaniesView = () => {
+const ClientsView = () => {
     const [companies, setCompanies] = useState<Company[]>([]);
     const [loading, setLoading] = useState(true);
     const [isEditing, setIsEditing] = useState(false);
@@ -147,10 +177,9 @@ const CompaniesView = () => {
     const fetchData = async () => {
         setLoading(true);
         const data = await DataService.getCompanies();
-        setCompanies(data);
+        setCompanies(data.sort((a,b) => a.type === CompanyType.CLIENT ? -1 : 1));
         setLoading(false);
     };
-
     useEffect(() => { fetchData(); }, []);
 
     const handleSave = async () => {
@@ -163,18 +192,17 @@ const CompaniesView = () => {
     return (
         <div className="space-y-6">
             <div className="flex justify-between items-center">
-                <h2 className="text-2xl font-bold text-brand-brown uppercase">Relaties</h2>
-                <Button onClick={() => setIsEditing(!isEditing)}>{isEditing ? 'Sluiten' : '+ Relatie'}</Button>
+                <h2 className="text-2xl font-bold text-brand-brown uppercase">Klanten & Relaties</h2>
+                <Button onClick={() => setIsEditing(!isEditing)}>{isEditing ? 'Sluiten' : '+ Nieuwe Klant'}</Button>
             </div>
-
             {isEditing && (
-                <Card title="Nieuwe Relatie">
+                <Card title="Nieuwe Klant Aanmaken">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <Input label="Bedrijfsnaam" value={form.name} onChange={e => setForm({...form, name: e.target.value})} />
-                        <Select label="Type" value={form.type} onChange={e => setForm({...form, type: e.target.value as CompanyType})}>
+                        <Select label="Type Relatie" value={form.type} onChange={e => setForm({...form, type: e.target.value as CompanyType})}>
                             <option value={CompanyType.CLIENT}>Klant</option>
                             <option value={CompanyType.SUPPLIER}>Leverancier</option>
-                            <option value={CompanyType.INTERNAL}>Intern</option>
+                            <option value={CompanyType.INTERNAL}>Intern / Partner</option>
                         </Select>
                         <Input label="KVK Nummer" value={form.kvk} onChange={e => setForm({...form, kvk: e.target.value})} />
                         <Input label="BTW Nummer" value={form.btw} onChange={e => setForm({...form, btw: e.target.value})} />
@@ -188,27 +216,21 @@ const CompaniesView = () => {
                     <Button onClick={handleSave} className="mt-4">Opslaan</Button>
                 </Card>
             )}
-
             <div className="bg-white border-2 border-brand-taupe overflow-hidden">
                 <table className="w-full text-sm text-left">
                     <thead className="bg-brand-taupe text-white uppercase text-xs">
-                        <tr>
-                            <th className="p-3">Naam</th>
-                            <th className="p-3">Type</th>
-                            <th className="p-3">Plaats</th>
-                            <th className="p-3">KVK / BTW</th>
-                        </tr>
+                        <tr><th className="p-3">Naam</th><th className="p-3">Type</th><th className="p-3">Plaats</th><th className="p-3">KVK / BTW</th></tr>
                     </thead>
                     <tbody className="divide-y divide-brand-cream">
                         {companies.map(c => (
                             <tr key={c.id} className="hover:bg-brand-cream/50">
                                 <td className="p-3 font-bold">{c.name}</td>
-                                <td className="p-3 uppercase text-xs">{c.type}</td>
+                                <td className="p-3 uppercase text-xs"><span className={`px-2 py-1 ${c.type === CompanyType.CLIENT ? 'bg-brand-orange text-white' : 'bg-gray-200'}`}>{c.type}</span></td>
                                 <td className="p-3">{c.address?.city}</td>
                                 <td className="p-3 font-mono text-xs">{c.kvk} <br/> {c.btw}</td>
                             </tr>
                         ))}
-                        {companies.length === 0 && !loading && <tr><td colSpan={4} className="p-4 text-center text-brand-taupe">Geen relaties.</td></tr>}
+                        {companies.length === 0 && !loading && <tr><td colSpan={4} className="p-4 text-center text-brand-taupe">Geen klanten of relaties gevonden.</td></tr>}
                     </tbody>
                 </table>
             </div>
@@ -219,37 +241,32 @@ const CompaniesView = () => {
 const ProjectsView = () => {
     const [projects, setProjects] = useState<Project[]>([]);
     const [companies, setCompanies] = useState<Company[]>([]);
+    const [shareholders, setShareholders] = useState<Shareholder[]>([]);
     const [isEditing, setIsEditing] = useState(false);
-    const [form, setForm] = useState<Partial<Project>>({ name: '', status: 'ACTIEF', startDate: new Date().toISOString().split('T')[0], budget: 0 });
-    const [loading, setLoading] = useState(true);
+    const [form, setForm] = useState<Partial<Project>>({ name: '', status: 'ACTIEF', startDate: new Date().toISOString().split('T')[0], leadShareholderId: 'BOTH' });
 
     const fetchData = async () => {
-        setLoading(true);
-        const [p, c] = await Promise.all([DataService.getProjects(), DataService.getCompanies()]);
-        setProjects(p);
-        setCompanies(c);
-        setLoading(false);
+        const [p, c, s] = await Promise.all([DataService.getProjects(), DataService.getCompanies(), DataService.getShareholders()]);
+        setProjects(p); setCompanies(c); setShareholders(s);
     };
-
     useEffect(() => { fetchData(); }, []);
 
     const handleSave = async () => {
-        if (!form.companyId) return alert("Selecteer een bedrijf");
+        if (!form.companyId) return alert("Selecteer een klant");
         await DataService.addProject(form);
         setIsEditing(false);
         fetchData();
-        setForm({ name: '', status: 'ACTIEF', startDate: new Date().toISOString().split('T')[0], budget: 0 });
+        setForm({ name: '', status: 'ACTIEF', startDate: new Date().toISOString().split('T')[0], leadShareholderId: 'BOTH' });
     };
 
     return (
         <div className="space-y-6">
             <div className="flex justify-between items-center">
                 <h2 className="text-2xl font-bold text-brand-brown uppercase">Projecten</h2>
-                <Button onClick={() => setIsEditing(!isEditing)}>{isEditing ? 'Sluiten' : '+ Project'}</Button>
+                <Button onClick={() => setIsEditing(!isEditing)}>{isEditing ? 'Sluiten' : '+ Nieuw Project'}</Button>
             </div>
-
             {isEditing && (
-                <Card title="Nieuw Project">
+                <Card title="Nieuw Project Starten">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <Input label="Projectnaam" value={form.name} onChange={e => setForm({...form, name: e.target.value})} />
                         <Select label="Klant" value={form.companyId || ''} onChange={e => setForm({...form, companyId: e.target.value})}>
@@ -258,42 +275,260 @@ const ProjectsView = () => {
                                 <option key={c.id} value={c.id}>{c.name}</option>
                             ))}
                         </Select>
-                        <Input label="Startdatum" type="date" value={form.startDate} onChange={e => setForm({...form, startDate: e.target.value})} />
-                        <Select label="Status" value={form.status} onChange={e => setForm({...form, status: e.target.value as any})}>
-                            <option value="ACTIEF">Actief</option>
-                            <option value="VOLTOOID">Voltooid</option>
-                            <option value="GEARCHIVEERD">Gearchiveerd</option>
+                        <Select label="Verantwoordelijke Partner" value={form.leadShareholderId || ''} onChange={e => setForm({...form, leadShareholderId: e.target.value})}>
+                            <option value="BOTH">Beide / Gezamenlijk</option>
+                            {shareholders.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </Select>
-                        <Input label="Budget" type="number" value={form.budget} onChange={e => setForm({...form, budget: parseFloat(e.target.value)})} />
+                        <Input label="Startdatum" type="date" value={form.startDate} onChange={e => setForm({...form, startDate: e.target.value})} />
                     </div>
-                    <Button onClick={handleSave} className="mt-4">Opslaan</Button>
+                    <Button onClick={handleSave} className="mt-4">Project Opslaan</Button>
                 </Card>
             )}
-
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {projects.map(p => {
-                    const clientName = companies.find(c => c.id === p.companyId)?.name || 'Onbekend';
+                {projects.map(p => (
+                    <Card key={p.id} title={p.name}>
+                        <div className="text-sm space-y-2">
+                            <div className="flex justify-between border-b border-brand-cream pb-1"><span className="text-brand-taupe">Klant:</span><span className="font-bold">{companies.find(c => c.id === p.companyId)?.name || 'Onbekend'}</span></div>
+                            <div className="flex justify-between border-b border-brand-cream pb-1"><span className="text-brand-taupe">Partner:</span><span className="font-mono">{p.leadShareholderId && p.leadShareholderId !== 'BOTH' ? shareholders.find(s => s.id === p.leadShareholderId)?.name : 'Gezamenlijk'}</span></div>
+                            <div className="flex justify-between"><span className="text-brand-taupe">Status:</span><span className={`px-2 py-0.5 text-xs text-white ${p.status === 'ACTIEF' ? 'bg-green-600' : 'bg-brand-taupe'}`}>{p.status}</span></div>
+                        </div>
+                    </Card>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const ExpensesView = () => {
+    const [expenses, setExpenses] = useState<Expense[]>([]);
+    const [companies, setCompanies] = useState<Company[]>([]);
+    const [view, setView] = useState<'LIST' | 'NEW'>('LIST');
+    
+    const [form, setForm] = useState({
+        description: '', date: new Date().toISOString().split('T')[0], category: EXPENSE_CATEGORIES[0], 
+        amountInput: 0, vatIncluded: true, vatRate: 21, companyId: '', fileData: '', fileName: ''
+    });
+
+    const fetchData = async () => {
+        const [e, c] = await Promise.all([DataService.getExpenses(), DataService.getCompanies()]);
+        setExpenses(e.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+        setCompanies(c);
+    };
+    useEffect(() => { fetchData(); }, [view]);
+
+    const calculated = (() => {
+        const amt = form.amountInput;
+        const rate = form.vatRate / 100;
+        if (form.vatIncluded) {
+            const excl = amt / (1 + rate);
+            return { excl, vat: amt - excl, total: amt };
+        } else {
+            return { excl: amt, vat: amt * rate, total: amt * (1 + rate) };
+        }
+    })();
+
+    const handleSave = async () => {
+        if(!form.description || !form.amountInput) return;
+        await DataService.addExpense({
+            date: form.date, description: form.description, category: form.category,
+            amountExcl: calculated.excl, vatAmount: calculated.vat, companyId: form.companyId || undefined,
+            fileData: form.fileData, fileName: form.fileName
+        });
+        setForm({ description: '', date: new Date().toISOString().split('T')[0], category: EXPENSE_CATEGORIES[0], amountInput: 0, vatIncluded: true, vatRate: 21, companyId: '', fileData: '', fileName: '' });
+        setView('LIST');
+    };
+
+    if (view === 'NEW') {
+        return (
+            <Card title="Kosten Registreren" action={<Button variant="secondary" onClick={() => setView('LIST')}>Annuleren</Button>}>
+                <FileUpload onFileSelect={(data, name) => setForm({...form, fileData: data, fileName: name})} />
+                {form.fileName && <div className="mb-4 text-xs text-green-600 font-bold">Bestand geselecteerd: {form.fileName}</div>}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Input label="Omschrijving" value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
+                    <Input label="Datum" type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} />
+                    <Select label="Categorie" value={form.category} onChange={e => setForm({...form, category: e.target.value})}>{EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}</Select>
+                    <Select label="Leverancier" value={form.companyId} onChange={e => setForm({...form, companyId: e.target.value})}><option value="">Geen</option>{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</Select>
+                    
+                    <div className="md:col-span-2 border-t border-brand-taupe pt-4">
+                         <div className="grid grid-cols-3 gap-4">
+                            <Input label="Bedrag (Invoer)" type="number" step="0.01" value={form.amountInput} onChange={e => setForm({...form, amountInput: parseFloat(e.target.value)})} />
+                            <Select label="Bedrag is" value={form.vatIncluded ? 'INCL' : 'EXCL'} onChange={e => setForm({...form, vatIncluded: e.target.value === 'INCL'})}>
+                                <option value="INCL">Inclusief BTW</option>
+                                <option value="EXCL">Exclusief BTW</option>
+                            </Select>
+                            <Select label="BTW Tarief" value={form.vatRate} onChange={e => setForm({...form, vatRate: parseInt(e.target.value)})}>
+                                <option value="21">21%</option><option value="9">9%</option><option value="0">0%</option>
+                            </Select>
+                         </div>
+                    </div>
+                    <div className="md:col-span-2 bg-brand-cream p-3 border border-brand-taupe flex justify-between items-center">
+                        <div className="text-sm">Excl: € {calculated.excl.toFixed(2)} | BTW: € {calculated.vat.toFixed(2)}</div>
+                        <div className="font-bold text-lg text-brand-orange">Totaal: € {calculated.total.toFixed(2)}</div>
+                    </div>
+                </div>
+                <Button onClick={handleSave} className="mt-4">Opslaan</Button>
+            </Card>
+        );
+    }
+
+    return (
+        <div className="space-y-6">
+            <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-brand-brown uppercase">Zakelijke Kosten</h2><Button onClick={() => setView('NEW')}>+ Registreer Kosten</Button></div>
+            <div className="overflow-x-auto border-2 border-brand-taupe bg-white">
+                <table className="w-full text-sm text-left"><thead className="bg-brand-taupe text-white uppercase text-xs"><tr><th className="p-3">Datum</th><th className="p-3">Omschrijving</th><th className="p-3 text-right">Excl.</th><th className="p-3 text-right">BTW</th><th className="p-3 text-right">Totaal</th><th className="p-3">PDF</th></tr></thead>
+                    <tbody className="divide-y divide-brand-cream">
+                        {expenses.map(ex => (
+                            <tr key={ex.id} className="hover:bg-brand-cream/50">
+                                <td className="p-3">{ex.date}</td><td className="p-3 font-bold">{ex.description}</td>
+                                <td className="p-3 text-right">€ {ex.amountExcl.toFixed(2)}</td><td className="p-3 text-right">€ {ex.vatAmount.toFixed(2)}</td><td className="p-3 text-right font-bold">€ {(ex.amountExcl + ex.vatAmount).toFixed(2)}</td>
+                                <td className="p-3">{ex.fileName ? '📎' : '-'}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+};
+
+const InvestmentsView = () => {
+    const [investments, setInvestments] = useState<Investment[]>([]);
+    const [view, setView] = useState<'LIST' | 'NEW'>('LIST');
+    const [form, setForm] = useState({
+        description: '', date: new Date().toISOString().split('T')[0], category: INVESTMENT_CATEGORIES[0],
+        purchaseValue: 0, residualValue: 0, lifespanYears: 5, fileData: '', fileName: ''
+    });
+
+    const fetchData = async () => {
+        const data = await DataService.getInvestments();
+        setInvestments(data.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+    };
+    useEffect(() => { fetchData(); }, [view]);
+
+    const handleSave = async () => {
+        if(!form.description || !form.purchaseValue) return;
+        await DataService.addInvestment({
+            description: form.description, date: form.date, category: form.category as any,
+            purchaseValue: form.purchaseValue, residualValue: form.residualValue, lifespanYears: form.lifespanYears,
+            fileData: form.fileData, fileName: form.fileName
+        });
+        setForm({ description: '', date: new Date().toISOString().split('T')[0], category: INVESTMENT_CATEGORIES[0], purchaseValue: 0, residualValue: 0, lifespanYears: 5, fileData: '', fileName: '' });
+        setView('LIST');
+    };
+
+    if(view === 'NEW') {
+        return (
+            <Card title="Investering Registreren" action={<Button variant="secondary" onClick={() => setView('LIST')}>Annuleren</Button>}>
+                <FileUpload onFileSelect={(data, name) => setForm({...form, fileData: data, fileName: name})} />
+                {form.fileName && <div className="mb-4 text-xs text-green-600 font-bold">Bestand geselecteerd: {form.fileName}</div>}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Input label="Omschrijving" value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
+                    <Input label="Aanschafdatum" type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} />
+                    <Select label="Categorie" value={form.category} onChange={e => setForm({...form, category: e.target.value})}>{INVESTMENT_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}</Select>
+                    <Input label="Aanschafwaarde (Excl BTW)" type="number" value={form.purchaseValue} onChange={e => setForm({...form, purchaseValue: parseFloat(e.target.value)})} />
+                    <Input label="Restwaarde" type="number" value={form.residualValue} onChange={e => setForm({...form, residualValue: parseFloat(e.target.value)})} />
+                    <Input label="Afschrijving (Jaren)" type="number" value={form.lifespanYears} onChange={e => setForm({...form, lifespanYears: parseInt(e.target.value)})} />
+                </div>
+                <Button onClick={handleSave} className="mt-4">Opslaan</Button>
+            </Card>
+        );
+    }
+
+    return (
+        <div className="space-y-6">
+            <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-brand-brown uppercase">Investeringen</h2><Button onClick={() => setView('NEW')}>+ Registreer Investering</Button></div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {investments.map(inv => {
+                    const currentVal = calculateBookValue(inv);
                     return (
-                        <Card key={p.id} title={p.name}>
-                            <div className="text-sm space-y-2">
-                                <div className="flex justify-between">
-                                    <span className="text-brand-taupe">Klant:</span>
-                                    <span className="font-bold">{clientName}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span className="text-brand-taupe">Status:</span>
-                                    <span className={`px-2 py-0.5 text-xs text-white ${p.status === 'ACTIEF' ? 'bg-green-600' : 'bg-brand-taupe'}`}>{p.status}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span className="text-brand-taupe">Start:</span>
-                                    <span>{p.startDate}</span>
-                                </div>
+                        <Card key={inv.id} title={inv.description}>
+                            <div className="space-y-2 text-sm">
+                                <div className="flex justify-between"><span>Datum:</span><span>{inv.date}</span></div>
+                                <div className="flex justify-between"><span>Aanschaf:</span><span>€ {inv.purchaseValue.toFixed(2)}</span></div>
+                                <div className="flex justify-between font-bold text-brand-orange"><span>Boekwaarde:</span><span>€ {currentVal.toFixed(2)}</span></div>
+                                {inv.fileName && <div className="text-xs text-brand-taupe mt-2">📄 PDF Beschikbaar</div>}
                             </div>
                         </Card>
                     );
                 })}
-                {projects.length === 0 && !loading && <p className="text-brand-taupe italic">Geen projecten.</p>}
             </div>
+        </div>
+    );
+};
+
+const VatReturnView = () => {
+    const [year, setYear] = useState(new Date().getFullYear());
+    const [quarter, setQuarter] = useState(Math.ceil((new Date().getMonth() + 1) / 3));
+    const [report, setReport] = useState<VatReport | null>(null);
+    const [kiaStats, setKiaStats] = useState<{total: number, deduction: number} | null>(null);
+    const [downloading, setDownloading] = useState(false);
+
+    useEffect(() => {
+        const calculate = async () => {
+            const qData = QUARTERS.find(q => q.id === quarter);
+            if (!qData) return;
+            const invoices = await DataService.getInvoices();
+            const expenses = await DataService.getExpenses();
+            const investments = await DataService.getInvestments();
+
+            const start = `${year}-${qData.range[0]}-01`;
+            const end = `${year}-${qData.range[1]}-31`;
+
+            let tHigh = 0, vHigh = 0, tLow = 0, vLow = 0;
+            invoices.filter(i => i.type === InvoiceType.SALES && i.date >= start && i.date <= end)
+                .forEach(inv => {
+                    inv.lines.forEach(line => {
+                        if (line.vatRate === 21) { tHigh += line.amount; vHigh += line.amount * 0.21; }
+                        if (line.vatRate === 9) { tLow += line.amount; vLow += line.amount * 0.09; }
+                    });
+                });
+
+            let vDeduct = 0;
+            expenses.filter(e => e.date >= start && e.date <= end).forEach(e => vDeduct += e.vatAmount);
+
+            setReport({ period: `Q${quarter}`, year, turnoverHigh: tHigh, vatHigh: vHigh, turnoverLow: tLow, vatLow: vLow, vatDeductible: vDeduct, totalPayable: (vHigh + vLow) - vDeduct });
+
+            const yearStart = `${year}-01-01`; const yearEnd = `${year}-12-31`;
+            const yearlyInvestments = investments.filter(i => i.date >= yearStart && i.date <= yearEnd && i.purchaseValue >= KIA_MIN_ITEM_VALUE).reduce((acc, i) => acc + i.purchaseValue, 0);
+            setKiaStats({ total: yearlyInvestments, deduction: calculateKiaDeduction(yearlyInvestments) });
+        };
+        calculate();
+    }, [year, quarter]);
+
+    const handleDownload = async () => {
+        setDownloading(true);
+        const qData = QUARTERS.find(q => q.id === quarter);
+        if(qData) await DataService.downloadPeriodArchive(year, quarter, qData.range);
+        setDownloading(false);
+    };
+
+    const qInfo = QUARTERS.find(q => q.id === quarter);
+
+    return (
+        <div className="space-y-6">
+            <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-brand-brown uppercase">BTW Aangifte</h2>
+                <div className="flex gap-2">
+                    <Select label="" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-24"><option value="2024">2024</option><option value="2025">2025</option></Select>
+                    <Select label="" value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-32">{QUARTERS.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}</Select>
+                </div>
+            </div>
+            {report && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <Card title={`Aangifte ${year} ${report.period}`}>
+                        <div className="bg-brand-cream p-4 mb-4 text-sm border border-brand-taupe"><span className="font-bold text-brand-orange">DEADLINE:</span> {qInfo?.deadline} {quarter === 4 ? year + 1 : year}</div>
+                        <div className="space-y-4">
+                            <div className="border-b border-brand-cream pb-2"><h4 className="font-bold text-sm uppercase">1a. 21% Leveringen</h4><div className="grid grid-cols-2"><span>Omzet: € {report.turnoverHigh.toFixed(0)}</span><span>BTW: € {report.vatHigh.toFixed(0)}</span></div></div>
+                            <div className="border-b border-brand-cream pb-2"><h4 className="font-bold text-sm uppercase">1b. 9% Leveringen</h4><div className="grid grid-cols-2"><span>Omzet: € {report.turnoverLow.toFixed(0)}</span><span>BTW: € {report.vatLow.toFixed(0)}</span></div></div>
+                            <div className="border-b border-brand-cream pb-2"><h4 className="font-bold text-sm uppercase">5b. Voorbelasting</h4><div className="text-right">- € {report.vatDeductible.toFixed(0)}</div></div>
+                            <div className="bg-brand-brown text-white p-3 flex justify-between items-center font-bold"><span>Totaal</span><span className="font-mono text-lg">€ {report.totalPayable.toFixed(0)}</span></div>
+                        </div>
+                        <Button onClick={handleDownload} disabled={downloading} className="w-full mt-4">{downloading ? 'Aanmaken...' : 'Download Dossier (ZIP)'}</Button>
+                    </Card>
+                    {kiaStats && <Card title="Inkomstenbelasting (KIA)"><Metric label="Totale Investering" value={`€ ${kiaStats.total.toFixed(2)}`} /><Metric label="KIA Aftrek" value={`€ ${kiaStats.deduction.toFixed(2)}`} highlight /></Card>}
+                </div>
+            )}
         </div>
     );
 };
@@ -302,140 +537,117 @@ const InvoicesView = () => {
     const [invoices, setInvoices] = useState<Invoice[]>([]);
     const [companies, setCompanies] = useState<Company[]>([]);
     const [projects, setProjects] = useState<Project[]>([]);
+    const [shareholders, setShareholders] = useState<Shareholder[]>([]);
     const [view, setView] = useState<'LIST' | 'NEW'>('LIST');
-
-    // New Invoice Form State
+    
+    // Upload Form State
     const [invType, setInvType] = useState<InvoiceType>(InvoiceType.SALES);
-    const [companyId, setCompanyId] = useState('');
-    const [projectId, setProjectId] = useState('');
-    const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-    const [lines, setLines] = useState<InvoiceLine[]>([{ id: '1', description: '', amount: 0, vatRate: 21 }]);
+    const [form, setForm] = useState({
+        date: new Date().toISOString().split('T')[0], companyId: '', projectId: '',
+        totalInput: 0, vatIncluded: true, vatRate: 21, fileData: '', fileName: ''
+    });
 
     const fetchData = async () => {
-        const [i, c, p] = await Promise.all([DataService.getInvoices(), DataService.getCompanies(), DataService.getProjects()]);
-        setInvoices(i);
-        setCompanies(c);
-        setProjects(p);
+        const [i, c, p, s] = await Promise.all([DataService.getInvoices(), DataService.getCompanies(), DataService.getProjects(), DataService.getShareholders()]);
+        setInvoices(i); setCompanies(c); setProjects(p); setShareholders(s);
     };
-
     useEffect(() => { fetchData(); }, [view]);
 
-    const handleSave = async () => {
-        if (!companyId) return alert("Selecteer een bedrijf");
-        // Als het verkoop is, is een project verplicht volgens requirement 2?
-        // "Projects koppelen aan bedrijven (verplichte afhankelijkheid)" -> Dit impliceert bedrijf<->project relatie.
-        // We maken project keuze optioneel voor factuur, maar wel aangeraden.
+    // Calculate splits and net amounts
+    const calculated = (() => {
+        const amt = form.totalInput;
+        const rate = form.vatRate / 100;
+        const excl = form.vatIncluded ? amt / (1 + rate) : amt;
+        const vat = form.vatIncluded ? amt - excl : amt * rate;
+        return { excl, vat, total: form.vatIncluded ? amt : amt + vat };
+    })();
 
-        const number = `${invType === InvoiceType.SALES ? 'INV' : 'PUR'}-${date.substring(0,4)}-${date.substring(5,7)}-${Math.floor(Math.random() * 1000)}`;
+    const handleSave = async () => {
+        if (!form.companyId || !form.totalInput) return alert("Vul bedrijf en bedrag in");
         
+        // Generate Split automatically based on equal parts for now, OR based on project logic later
+        // User said "because I indicate percentage", but in this "Upload" flow simpler is better.
+        // We will use equal split as default if project doesn't have specific logic
+        const split: any = {};
+        if(shareholders.length > 0) {
+            const equal = 100 / shareholders.length;
+            shareholders.forEach(s => split[s.id] = equal);
+        }
+
+        const number = `INV-${form.date.replace(/-/g,'')}-${Math.floor(Math.random()*1000)}`;
+        
+        // Create single line item representing the full PDF upload
+        const line: InvoiceLine = { 
+            id: crypto.randomUUID(), 
+            description: "Factuur Upload: " + (form.fileName || 'Onbekend'), 
+            amount: calculated.excl, 
+            vatRate: form.vatRate 
+        };
+
         await DataService.addInvoice({
-            number,
-            type: invType,
-            companyId,
-            projectId: projectId || undefined,
-            date,
-            dueDate: new Date(Date.parse(date) + 12096e5).toISOString().split('T')[0], // +14 days
+            number, type: invType, companyId: form.companyId, projectId: form.projectId || undefined,
+            date: form.date, dueDate: new Date(Date.parse(form.date) + 12096e5).toISOString().split('T')[0],
             status: PaymentStatus.DRAFT,
-            lines,
-            shareholderSplit: { 'sh_1': 50, 'sh_2': 50 }
+            lines: [line],
+            shareholderSplit: split,
+            fileData: form.fileData, fileName: form.fileName
         });
         setView('LIST');
+        setForm({ date: new Date().toISOString().split('T')[0], companyId: '', projectId: '', totalInput: 0, vatIncluded: true, vatRate: 21, fileData: '', fileName: '' });
     };
-
-    const addLine = () => setLines([...lines, { id: crypto.randomUUID(), description: '', amount: 0, vatRate: 21 }]);
 
     if (view === 'NEW') {
         const relevantCompanies = companies.filter(c => invType === InvoiceType.SALES ? c.type === CompanyType.CLIENT : c.type === CompanyType.SUPPLIER);
-        const relevantProjects = projects.filter(p => p.companyId === companyId);
+        const relevantProjects = projects.filter(p => p.companyId === form.companyId);
 
         return (
-            <Card title="Nieuwe Factuur" action={<Button variant="secondary" onClick={() => setView('LIST')}>Annuleren</Button>}>
+            <Card title="Factuur Uploaden" action={<Button variant="secondary" onClick={() => setView('LIST')}>Annuleren</Button>}>
                 <div className="space-y-4">
+                    <FileUpload onFileSelect={(data, name) => setForm({...form, fileData: data, fileName: name})} />
+                    {form.fileName && <div className="text-xs font-bold text-green-600">PDF Gereed: {form.fileName}</div>}
+
                     <div className="grid grid-cols-2 gap-4">
-                        <Select label="Type" value={invType} onChange={e => setInvType(e.target.value as InvoiceType)}>
-                            <option value={InvoiceType.SALES}>Verkoop</option>
-                            <option value={InvoiceType.PURCHASE}>Inkoop</option>
-                        </Select>
-                        <Input label="Datum" type="date" value={date} onChange={e => setDate(e.target.value)} />
-                        
-                        <Select label="Bedrijf" value={companyId} onChange={e => setCompanyId(e.target.value)}>
-                            <option value="">Selecteer...</option>
-                            {relevantCompanies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                        </Select>
-                        
-                        <Select label="Project (Optioneel)" value={projectId} onChange={e => setProjectId(e.target.value)}>
-                            <option value="">Geen Project</option>
-                            {relevantProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                        </Select>
+                        <Select label="Type" value={invType} onChange={e => setInvType(e.target.value as InvoiceType)}><option value={InvoiceType.SALES}>Verkoop</option><option value={InvoiceType.PURCHASE}>Inkoop</option></Select>
+                        <Input label="Datum" type="date" value={form.date} onChange={e => setForm({...form, date: e.target.value})} />
+                        <Select label="Bedrijf" value={form.companyId} onChange={e => setForm({...form, companyId: e.target.value})}><option value="">Selecteer...</option>{relevantCompanies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</Select>
+                        <Select label="Project" value={form.projectId} onChange={e => setForm({...form, projectId: e.target.value})}><option value="">Geen Project</option>{relevantProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</Select>
                     </div>
 
-                    <div>
-                        <label className="block text-xs uppercase tracking-widest mb-2">Factuurregels</label>
-                        {lines.map((line, idx) => (
-                            <div key={line.id} className="grid grid-cols-12 gap-2 mb-2">
-                                <div className="col-span-6">
-                                    <input className="w-full p-2 border border-brand-taupe" placeholder="Omschrijving" value={line.description} 
-                                        onChange={e => { const n = [...lines]; n[idx].description = e.target.value; setLines(n); }} />
-                                </div>
-                                <div className="col-span-3">
-                                    <input type="number" className="w-full p-2 border border-brand-taupe" placeholder="Bedrag" value={line.amount} 
-                                        onChange={e => { const n = [...lines]; n[idx].amount = parseFloat(e.target.value); setLines(n); }} />
-                                </div>
-                                <div className="col-span-3">
-                                    <select className="w-full p-2 border border-brand-taupe" value={line.vatRate} 
-                                        onChange={e => { const n = [...lines]; n[idx].vatRate = parseInt(e.target.value); setLines(n); }}>
-                                        <option value={21}>21%</option>
-                                        <option value={9}>9%</option>
-                                        <option value={0}>0%</option>
-                                    </select>
-                                </div>
-                            </div>
-                        ))}
-                        <Button variant="secondary" onClick={addLine} className="mt-2 text-xs">+ Regel</Button>
+                    <div className="border-t border-brand-taupe pt-4">
+                        <div className="grid grid-cols-3 gap-4">
+                            <Input label="Bedrag (Invoer)" type="number" step="0.01" value={form.totalInput} onChange={e => setForm({...form, totalInput: parseFloat(e.target.value)})} />
+                            <Select label="Bedrag is" value={form.vatIncluded ? 'INCL' : 'EXCL'} onChange={e => setForm({...form, vatIncluded: e.target.value === 'INCL'})}><option value="INCL">Inclusief BTW</option><option value="EXCL">Exclusief BTW</option></Select>
+                            <Select label="BTW Tarief" value={form.vatRate} onChange={e => setForm({...form, vatRate: parseInt(e.target.value)})}>
+                                <option value="21">21%</option><option value="9">9%</option><option value="0">0%</option>
+                            </Select>
+                        </div>
+                        <div className="bg-brand-cream p-3 flex justify-between items-center text-sm border border-brand-taupe">
+                            <div>Netto: € {calculated.excl.toFixed(2)} | BTW: € {calculated.vat.toFixed(2)}</div>
+                            <div className="font-bold text-lg text-brand-orange">Totaal: € {calculated.total.toFixed(2)}</div>
+                        </div>
                     </div>
-                    <Button onClick={handleSave}>Opslaan</Button>
+                    <Button onClick={handleSave}>Opslaan & Uploaden</Button>
                 </div>
             </Card>
         );
     }
 
-    // Filter for sales invoices primarily
     const displayInvoices = invoices.filter(i => i.type === InvoiceType.SALES);
-
     return (
         <div className="space-y-6">
-            <div className="flex justify-between items-center">
-                <h2 className="text-2xl font-bold text-brand-brown uppercase">Verkoopfacturen</h2>
-                <Button onClick={() => setView('NEW')}>+ Nieuwe Factuur</Button>
-            </div>
+            <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-brand-brown uppercase">Verkoopfacturen</h2><Button onClick={() => setView('NEW')}>+ Upload Factuur</Button></div>
             <div className="overflow-x-auto border-2 border-brand-taupe bg-white">
-                <table className="w-full text-sm text-left">
-                    <thead className="bg-brand-taupe text-white uppercase text-xs">
-                        <tr>
-                            <th className="p-3">Nr</th>
-                            <th className="p-3">Datum</th>
-                            <th className="p-3">Klant</th>
-                            <th className="p-3 text-right">Totaal</th>
-                            <th className="p-3">Status</th>
-                            <th className="p-3">Actie</th>
-                        </tr>
-                    </thead>
+                <table className="w-full text-sm text-left"><thead className="bg-brand-taupe text-white uppercase text-xs"><tr><th className="p-3">Datum</th><th className="p-3">Klant</th><th className="p-3 text-right">Totaal</th><th className="p-3">Status</th><th className="p-3">PDF</th><th className="p-3">Actie</th></tr></thead>
                     <tbody>
                         {displayInvoices.map(inv => {
                             const total = inv.lines.reduce((acc, l) => acc + (l.amount * (1 + l.vatRate/100)), 0);
                             const client = companies.find(c => c.id === inv.companyId)?.name || '...';
                             return (
                                 <tr key={inv.id} className="border-b border-brand-taupe/10">
-                                    <td className="p-3 font-mono">{inv.number}</td>
-                                    <td className="p-3">{inv.date}</td>
-                                    <td className="p-3 font-bold">{client}</td>
-                                    <td className="p-3 text-right font-mono">€ {total.toFixed(2)}</td>
+                                    <td className="p-3">{inv.date}</td><td className="p-3 font-bold">{client}</td><td className="p-3 text-right font-mono">€ {total.toFixed(2)}</td>
                                     <td className="p-3"><span className={`px-2 text-xs ${inv.status === 'BETAALD' ? 'bg-green-100 text-green-800' : 'bg-gray-100'}`}>{inv.status}</span></td>
-                                    <td className="p-3">
-                                        {inv.status !== 'BETAALD' && (
-                                            <button onClick={async () => { await DataService.updateInvoiceStatus(inv.id, PaymentStatus.PAID); fetchData(); }} className="text-xs text-brand-orange hover:underline">Markeer Betaald</button>
-                                        )}
-                                    </td>
+                                    <td className="p-3">{inv.fileName ? '📎' : '-'}</td>
+                                    <td className="p-3">{inv.status !== 'BETAALD' && <button onClick={async () => { await DataService.updateInvoiceStatus(inv.id, PaymentStatus.PAID); fetchData(); }} className="text-xs text-brand-orange hover:underline">Markeer Betaald</button>}</td>
                                 </tr>
                             );
                         })}
@@ -446,196 +658,78 @@ const InvoicesView = () => {
     );
 };
 
-const ExpensesView = () => {
-    const [expenses, setExpenses] = useState<Expense[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [isAdding, setIsAdding] = useState(false);
-    const [form, setForm] = useState<Partial<Expense>>({ description: '', amountExcl: 0, vatAmount: 0, category: EXPENSE_CATEGORIES[0] });
-
-    const fetchData = async () => {
-        setLoading(true);
-        const data = await DataService.getExpenses();
-        setExpenses(data);
-        setLoading(false);
-    };
-
-    useEffect(() => { fetchData(); }, []);
-
-    const handleSave = async () => {
-        await DataService.addExpense({ ...form, date: new Date().toISOString().split('T')[0] });
-        setIsAdding(false);
-        fetchData();
-        setForm({ description: '', amountExcl: 0, vatAmount: 0, category: EXPENSE_CATEGORIES[0] });
-    };
-
-    return (
-        <div className="space-y-6">
-            <div className="flex justify-between items-center">
-                <h2 className="text-2xl font-bold text-brand-brown uppercase">Kosten</h2>
-                <Button onClick={() => setIsAdding(!isAdding)}>{isAdding ? 'Sluiten' : '+ Kosten'}</Button>
-            </div>
-
-            {isAdding && (
-                <Card title="Nieuwe Kostenpost">
-                    <div className="grid grid-cols-2 gap-4 mb-4">
-                        <Input label="Omschrijving" value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
-                        <Select label="Categorie" value={form.category} onChange={e => setForm({...form, category: e.target.value})}>
-                            {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                        </Select>
-                        <Input label="Bedrag (Excl BTW)" type="number" value={form.amountExcl} onChange={e => setForm({...form, amountExcl: parseFloat(e.target.value)})} />
-                        <Input label="BTW Bedrag" type="number" value={form.vatAmount} onChange={e => setForm({...form, vatAmount: parseFloat(e.target.value)})} />
-                    </div>
-                    <Button onClick={handleSave}>Opslaan</Button>
-                </Card>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {expenses.map(e => (
-                    <div key={e.id} className="bg-white border border-brand-taupe p-4 flex justify-between">
-                        <div>
-                            <div className="font-bold">{e.description}</div>
-                            <div className="text-xs text-brand-taupe uppercase">{e.category}</div>
-                        </div>
-                        <div className="text-right">
-                            <div className="font-mono font-bold">€ {e.amountExcl.toFixed(2)}</div>
-                            <div className="text-xs text-brand-taupe">BTW: € {e.vatAmount.toFixed(2)}</div>
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
-};
-
-const DashboardView = ({ summary }: { summary: FinancialSummary }) => {
-    const [advice, setAdvice] = useState('');
-    const [loading, setLoading] = useState(false);
-
-    const getAiHelp = async () => {
-        setLoading(true);
-        const txt = await getFinancialAdvice(summary, "Geef een analyse van de huidige financiële stand en KIA status.");
-        setAdvice(txt);
-        setLoading(false);
-    };
-
-    return (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <Card title="Financieel">
-                <div className="grid grid-cols-2 gap-4">
-                    <Metric label="Omzet" value={`€ ${summary.revenue.toFixed(2)}`} />
-                    <Metric label="Kosten" value={`€ ${summary.expenses.toFixed(2)}`} />
-                    <Metric label="Winst" value={`€ ${summary.profit.toFixed(2)}`} highlight />
-                </div>
-            </Card>
-            <Card title="Belasting">
-                <Metric label="BTW Te Betalen" value={`€ ${summary.vatTotal.toFixed(2)}`} />
-                <Metric label="KIA Aftrek" value={`€ ${summary.kiaDeduction.toFixed(2)}`} subValue={summary.kiaDeduction > 0 ? "Toegepast" : "Niet van toepassing"} />
-            </Card>
-            <Card title="AI Advies" action={<Button variant="text" onClick={getAiHelp}>{loading ? '...' : 'Analyseren'}</Button>}>
-                <div className="text-sm whitespace-pre-wrap">{advice || "Vraag advies aan..."}</div>
-            </Card>
-        </div>
-    );
-};
-
-const CompanyInfoView = ({ summary }: { summary: FinancialSummary }) => {
+const CompanyInfoView = ({ summary, onSummaryUpdate }: { summary: FinancialSummary, onSummaryUpdate: () => void }) => {
     const [shareholders, setShareholders] = useState<Shareholder[]>([]);
-    
-    useEffect(() => {
-        const load = async () => {
-            const s = await DataService.getShareholders();
-            setShareholders(s);
-        };
-        load();
-    }, []);
-
-    const companyValue = summary.profit + summary.investments - summary.vatTotal; // Simplified valuation
-
-    return (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card title="Bedrijfswaarde">
-                <Metric label="Totale Waarde" value={`€ ${companyValue.toFixed(2)}`} highlight />
-                <div className="text-xs text-brand-taupe mt-2">
-                    Gebaseerd op winst + boekwaarde investeringen - openstaande belasting.
-                </div>
-            </Card>
-            <Card title="Aandeelhouders">
-                {shareholders.map(sh => {
-                    const shareValue = companyValue * (sh.defaultPercentage / 100);
-                    return (
-                        <div key={sh.id} className="mb-4 border-b border-brand-cream pb-2 last:border-0">
-                            <div className="flex justify-between font-bold text-brand-brown">
-                                <span>{sh.name}</span>
-                                <span>{sh.defaultPercentage}%</span>
-                            </div>
-                            <div className="flex justify-between text-sm mt-1">
-                                <span className="text-brand-taupe">Huidig aandeel:</span>
-                                <span className="font-mono">€ {shareValue.toFixed(2)}</span>
-                            </div>
-                        </div>
-                    );
-                })}
-            </Card>
-        </div>
-    );
-};
-
-const InvestmentsView = () => {
-    // Simple Investment view logic (abbreviated for space, assumed similar to previous but async)
-    const [investments, setInvestments] = useState<Investment[]>([]);
+    const [correction, setCorrection] = useState<number>(0);
     const [isAdding, setIsAdding] = useState(false);
-    const [form, setForm] = useState<Partial<Investment>>({ description: '', purchaseValue: 0, lifespanYears: 5, category: 'HARDWARE' });
+    const [newShareholder, setNewShareholder] = useState({ name: '', percentage: 0 });
+    const [loading, setLoading] = useState(true);
 
-    const fetchData = async () => {
-        setInvestments(await DataService.getInvestments());
+    const load = async () => {
+        setLoading(true);
+        const s = await DataService.getShareholders();
+        const val = await DataService.getSettings('company_value_correction');
+        setShareholders(s);
+        if (val) setCorrection(parseFloat(val));
+        setLoading(false);
     };
-    useEffect(() => { fetchData(); }, []);
 
-    const handleSave = async () => {
-        await DataService.addInvestment({ ...form, date: new Date().toISOString().split('T')[0] });
+    useEffect(() => { load(); }, []);
+
+    const handleCorrectionChange = async (val: number) => {
+        setCorrection(val);
+        await DataService.updateSettings('company_value_correction', val);
+        onSummaryUpdate(); 
+    };
+
+    const handleAddShareholder = async () => {
+        if(!newShareholder.name) return;
+        await DataService.addShareholder({ id: crypto.randomUUID(), name: newShareholder.name, defaultPercentage: newShareholder.percentage });
         setIsAdding(false);
-        fetchData();
+        setNewShareholder({ name: '', percentage: 0 });
+        load();
     };
-    
-    // KIA Logic
-    const qualifying = investments.filter(i => i.purchaseValue >= KIA_MIN_ITEM_VALUE);
-    const totalInv = qualifying.reduce((acc, i) => acc + i.purchaseValue, 0);
-    const kia = calculateKiaDeduction(totalInv);
+
+    const handleDeleteShareholder = async (id: string) => {
+        if(confirm("Weet je het zeker?")) {
+            await DataService.deleteShareholder(id);
+            load();
+        }
+    };
+
+    const companyValue = summary.profit + summary.investments - summary.vatTotal + correction;
+    const safeCompanyValue = isNaN(companyValue) ? 0 : companyValue;
 
     return (
-        <div className="space-y-6">
-            <div className="flex justify-between items-center">
-                 <h2 className="text-2xl font-bold text-brand-brown uppercase">Investeringen</h2>
-                 <Button onClick={() => setIsAdding(!isAdding)}>{isAdding ? 'Sluiten' : '+ Investering'}</Button>
-            </div>
-            <div className="bg-brand-brown text-brand-cream p-4 grid grid-cols-3 gap-4">
-                <div>
-                    <span className="text-xs uppercase text-brand-taupe">Totaal KIA Geschikt</span>
-                    <div className="text-xl font-mono">€ {totalInv.toFixed(2)}</div>
-                </div>
-                <div>
-                    <span className="text-xs uppercase text-brand-taupe">KIA Aftrek</span>
-                    <div className="text-xl font-mono font-bold text-brand-orange">€ {kia.toFixed(2)}</div>
-                </div>
-            </div>
-
-            {isAdding && (
-                <Card title="Nieuwe Investering">
-                    <div className="grid grid-cols-2 gap-4">
-                        <Input label="Omschrijving" value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
-                        <Input label="Waarde" type="number" value={form.purchaseValue} onChange={e => setForm({...form, purchaseValue: parseFloat(e.target.value)})} />
+        <div className="grid grid-cols-1 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <Card title="Bedrijf & Waardering">
+                    <Metric label="Totale Bedrijfswaarde" value={`€ ${safeCompanyValue.toFixed(2)}`} highlight />
+                    <div className="mt-6 pt-4 border-t border-brand-cream">
+                        <Input label="Handmatige Waardecorrectie" type="number" value={correction} onChange={e => handleCorrectionChange(parseFloat(e.target.value))} />
                     </div>
-                    <Button onClick={handleSave} className="mt-4">Opslaan</Button>
                 </Card>
-            )}
-
-            <div className="bg-white border-2 border-brand-taupe">
-                {investments.map(i => (
-                    <div key={i.id} className="flex justify-between p-3 border-b border-brand-cream">
-                        <span>{i.description}</span>
-                        <span className="font-mono">€ {i.purchaseValue.toFixed(2)}</span>
-                    </div>
-                ))}
+                <Card title="Aandeelhouders" action={<Button variant="text" onClick={() => setIsAdding(!isAdding)}>{isAdding ? 'Annuleren' : '+ Toevoegen'}</Button>}>
+                    {isAdding && (
+                        <div className="bg-brand-cream p-4 mb-4 border border-brand-taupe">
+                             <Input label="Naam" value={newShareholder.name} onChange={e => setNewShareholder({...newShareholder, name: e.target.value})} />
+                             <Input label="Percentage" type="number" value={newShareholder.percentage} onChange={e => setNewShareholder({...newShareholder, percentage: parseFloat(e.target.value)})} />
+                             <Button onClick={handleAddShareholder}>Opslaan</Button>
+                        </div>
+                    )}
+                    {shareholders.map(sh => {
+                        const shareValue = safeCompanyValue * (sh.defaultPercentage / 100);
+                        return (
+                            <div key={sh.id} className="mb-4 border-b border-brand-cream pb-2 last:border-0 group">
+                                <div className="flex justify-between font-bold text-brand-brown items-center">
+                                    <span>{sh.name}</span>
+                                    <div className="flex items-center gap-2"><span className="bg-brand-taupe text-white px-2 text-xs flex items-center">{sh.defaultPercentage}%</span><button onClick={() => handleDeleteShareholder(sh.id)} className="text-red-400 hover:text-red-600 text-xs px-1">x</button></div>
+                                </div>
+                                <div className="flex justify-between text-sm mt-1"><span className="text-brand-taupe">Huidige waarde:</span><span className="font-mono">€ {shareValue.toFixed(2)}</span></div>
+                            </div>
+                        );
+                    })}
+                </Card>
             </div>
         </div>
     );
@@ -646,7 +740,7 @@ const InvestmentsView = () => {
 export default function App() {
     const [session, setSession] = useState(null);
     const [activeTab, setActiveTab] = useState('DASHBOARD');
-    const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, investments: 0, profit: 0, vatPayable: 0, vatDeductible: 0, vatTotal: 0, kiaDeduction: 0 });
+    const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, investments: 0, profit: 0, vatPayable: 0, vatDeductible: 0, vatTotal: 0, kiaDeduction: 0, manualCorrection: 0 });
 
     useEffect(() => {
         if (supabase) {
@@ -658,34 +752,30 @@ export default function App() {
         }
     }, []);
 
-    // Calculate summary across all data
-    useEffect(() => {
+    const loadSummary = async () => {
         if (!session) return;
-        const loadSummary = async () => {
-            const [inv, exp, invest] = await Promise.all([DataService.getInvoices(), DataService.getExpenses(), DataService.getInvestments()]);
-            
-            const sales = inv.filter(i => i.type === InvoiceType.SALES && i.status !== PaymentStatus.DRAFT);
-            const revenue = sales.reduce((acc, i) => acc + i.lines.reduce((s, l) => s + l.amount, 0), 0);
-            const expensesTotal = exp.reduce((acc, e) => acc + e.amountExcl, 0);
-            const investmentTotal = invest.reduce((acc, i) => acc + i.purchaseValue, 0);
-            
-            // Simple KIA calc
-            const kia = calculateKiaDeduction(invest.filter(i => i.purchaseValue >= KIA_MIN_ITEM_VALUE).reduce((a, b) => a + b.purchaseValue, 0));
+        const [inv, exp, invest, correctionVal] = await Promise.all([
+            DataService.getInvoices(), DataService.getExpenses(), DataService.getInvestments(), DataService.getSettings('company_value_correction')
+        ]);
+        
+        const sales = inv.filter(i => i.type === InvoiceType.SALES && i.status !== PaymentStatus.DRAFT);
+        const revenue = sales.reduce((acc, i) => acc + i.lines.reduce((s, l) => s + l.amount, 0), 0);
+        const expensesTotal = exp.reduce((acc, e) => acc + e.amountExcl, 0);
+        const investmentTotal = invest.reduce((acc, i) => acc + i.purchaseValue, 0);
+        const correction = correctionVal ? parseFloat(correctionVal) : 0;
+        const kia = calculateKiaDeduction(invest.filter(i => i.purchaseValue >= KIA_MIN_ITEM_VALUE).reduce((a, b) => a + b.purchaseValue, 0));
+        const vatOut = sales.reduce((acc, i) => acc + i.lines.reduce((s, l) => s + (l.amount * l.vatRate/100), 0), 0);
+        const vatIn = exp.reduce((acc, e) => acc + e.vatAmount, 0);
 
-            const vatOut = sales.reduce((acc, i) => acc + i.lines.reduce((s, l) => s + (l.amount * l.vatRate/100), 0), 0);
-            const vatIn = exp.reduce((acc, e) => acc + e.vatAmount, 0);
+        setSummary({
+            revenue, expenses: expensesTotal, investments: investmentTotal, profit: revenue - expensesTotal,
+            vatPayable: vatOut, vatDeductible: vatIn, vatTotal: vatOut - vatIn, kiaDeduction: kia, manualCorrection: correction
+        });
+    };
 
-            setSummary({
-                revenue, expenses: expensesTotal, investments: investmentTotal,
-                profit: revenue - expensesTotal,
-                vatPayable: vatOut, vatDeductible: vatIn, vatTotal: vatOut - vatIn,
-                kiaDeduction: kia
-            });
-        };
-        loadSummary();
-    }, [session, activeTab]);
+    useEffect(() => { loadSummary(); }, [session, activeTab]);
 
-    if (!session) return <AuthView onLogin={() => {}} />; // onLogin handled by auth state change listener
+    if (!session) return <AuthView onLogin={() => {}} />; 
 
     const NavItem = ({ id, label }: { id: string, label: string }) => (
         <button onClick={() => setActiveTab(id)} 
@@ -697,32 +787,46 @@ export default function App() {
     return (
         <div className="min-h-screen flex bg-brand-cream text-brand-brown font-sans">
             <aside className="w-64 border-r border-brand-taupe h-screen sticky top-0 bg-brand-cream flex flex-col">
-                <div className="p-8 border-b border-brand-taupe mb-4">
-                    <h1 className="text-2xl font-bold text-brand-orange">LLM<br/><span className="text-brand-brown">SOLUTION</span></h1>
-                </div>
-                <nav className="flex-1 space-y-1">
-                    <NavItem id="DASHBOARD" label="Overzicht" />
-                    <NavItem id="INVOICES" label="Facturen" />
-                    <NavItem id="EXPENSES" label="Kosten" />
-                    <NavItem id="INVESTMENTS" label="Investeringen" />
+                <div className="p-8 border-b border-brand-taupe mb-4"><h1 className="text-2xl font-bold text-brand-orange">LLM<br/><span className="text-brand-brown">SOLUTION</span></h1></div>
+                <nav className="flex-1 space-y-1 overflow-y-auto">
+                    <div className="px-4 pt-4 pb-2 text-xs font-bold text-brand-taupe opacity-50">BOEKHOUDING</div>
+                    <NavItem id="DASHBOARD" label="Overzicht" /><NavItem id="INVOICES" label="Facturen" /><NavItem id="EXPENSES" label="Kosten" /><NavItem id="INVESTMENTS" label="Investeringen" /><NavItem id="VAT" label="BTW Aangifte" />
                     <div className="my-4 border-t border-brand-taupe opacity-20"></div>
-                    <NavItem id="COMPANIES" label="Relaties" />
-                    <NavItem id="PROJECTS" label="Projecten" />
-                    <NavItem id="COMPANY" label="Bedrijf" />
+                    <div className="px-4 pt-4 pb-2 text-xs font-bold text-brand-taupe opacity-50">LLM SOLUTION</div>
+                    <NavItem id="COMPANY" label="Bedrijf & Partners" /><NavItem id="CLIENTS" label="Klanten" /><NavItem id="PROJECTS" label="Projecten" />
                 </nav>
-                <div className="p-4">
-                    <Button variant="secondary" onClick={() => supabase?.auth.signOut()} className="w-full">Uitloggen</Button>
-                </div>
+                <div className="p-4 border-t border-brand-taupe"><Button variant="secondary" onClick={() => supabase?.auth.signOut()} className="w-full text-xs">Uitloggen</Button></div>
             </aside>
             <main className="flex-1 p-8 overflow-auto">
                 <div className="max-w-6xl mx-auto">
-                    {activeTab === 'DASHBOARD' && <DashboardView summary={summary} />}
+                    {activeTab === 'DASHBOARD' && (
+                        <div className="space-y-6">
+                            <h2 className="text-2xl font-bold uppercase">Dashboard</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <Card title="Financieel">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <Metric label="Omzet" value={`€ ${summary.revenue.toFixed(2)}`} />
+                                        <Metric label="Kosten" value={`€ ${summary.expenses.toFixed(2)}`} />
+                                        <Metric label="Winst" value={`€ ${summary.profit.toFixed(2)}`} highlight />
+                                    </div>
+                                </Card>
+                                <Card title="Belasting">
+                                    <Metric label="BTW Te Betalen" value={`€ ${summary.vatTotal.toFixed(2)}`} />
+                                    <Metric label="KIA Aftrek" value={`€ ${summary.kiaDeduction.toFixed(2)}`} subValue={summary.kiaDeduction > 0 ? "Toegepast" : "Niet van toepassing"} />
+                                </Card>
+                                <Card title="AI Advies" action={<Button variant="text" onClick={() => getFinancialAdvice(summary, "Quick scan")}>...</Button>}>
+                                    <div className="text-sm italic text-brand-taupe">Klik op '...' voor advies.</div>
+                                </Card>
+                            </div>
+                        </div>
+                    )}
                     {activeTab === 'INVOICES' && <InvoicesView />}
                     {activeTab === 'EXPENSES' && <ExpensesView />}
                     {activeTab === 'INVESTMENTS' && <InvestmentsView />}
-                    {activeTab === 'COMPANIES' && <CompaniesView />}
+                    {activeTab === 'VAT' && <VatReturnView />}
+                    {activeTab === 'CLIENTS' && <ClientsView />}
                     {activeTab === 'PROJECTS' && <ProjectsView />}
-                    {activeTab === 'COMPANY' && <CompanyInfoView summary={summary} />}
+                    {activeTab === 'COMPANY' && <CompanyInfoView summary={summary} onSummaryUpdate={loadSummary} />}
                 </div>
             </main>
         </div>

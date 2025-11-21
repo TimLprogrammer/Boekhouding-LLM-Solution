@@ -1,3 +1,4 @@
+
 export enum VATRate {
   ZERO = 0,
   LOW = 9,
@@ -65,7 +66,9 @@ export interface Invoice {
   status: PaymentStatus;
   lines: InvoiceLine[];
   shareholderSplit: Record<string, number>; // ShareholderID -> Percentage
-  attachmentUrl?: string;
+  attachmentUrl?: string; // Legacy URL (optional)
+  fileData?: string; // Base64 string
+  fileName?: string;
   createdAt: string;
 }
 
@@ -79,6 +82,8 @@ export interface Expense {
   companyId?: string;
   projectId?: string;
   receiptUrl?: string;
+  fileData?: string;
+  fileName?: string;
 }
 
 export interface Investment {
@@ -90,6 +95,8 @@ export interface Investment {
   lifespanYears: number;
   category: 'HARDWARE' | 'SOFTWARE' | 'INVENTARIS' | 'VOERTUIGEN' | 'OVERIG';
   receiptUrl?: string;
+  fileData?: string;
+  fileName?: string;
 }
 
 export interface Project {
@@ -99,7 +106,12 @@ export interface Project {
   startDate: string;
   endDate?: string;
   status: 'ACTIEF' | 'VOLTOOID' | 'GEARCHIVEERD';
-  budget?: number;
+  leadShareholderId?: string; // 'BOTH' or UUID
+}
+
+export interface Settings {
+  key: string;
+  value: any;
 }
 
 export interface FinancialSummary {
@@ -111,4 +123,16 @@ export interface FinancialSummary {
     vatDeductible: number;
     vatTotal: number;
     kiaDeduction: number;
+    manualCorrection: number; // From settings
+}
+
+export interface VatReport {
+    period: string; // 'Q1', 'Q2', 'Q3', 'Q4'
+    year: number;
+    turnoverHigh: number; // 1a
+    vatHigh: number;
+    turnoverLow: number; // 1b
+    vatLow: number;
+    vatDeductible: number; // 5b
+    totalPayable: number;
 }
